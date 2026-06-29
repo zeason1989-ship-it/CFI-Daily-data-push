@@ -13,6 +13,7 @@ import os
 import smtplib
 import ssl
 import sys
+import time
 import traceback
 import urllib.error
 import urllib.request
@@ -35,10 +36,17 @@ REQUIRED_ENV = (
 )
 
 REPORT_TITLE = "CFI Loan T 安卓/IOS-综合-风控日报/周报（规模、转化、风险）"
+SMTP_SEND_ATTEMPTS = 3
+SMTP_RETRY_DELAY_SECONDS = 5
 
 
 class ReportError(Exception):
     """Raised when the report cannot be generated or delivered."""
+
+
+def log(message: str) -> None:
+    timestamp = dt.datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z").strip()
+    print(f"[{timestamp}] {message}", flush=True)
 
 
 @dataclass(frozen=True)
@@ -251,6 +259,7 @@ def fetch_query_result(config: Config, query_id: int | str) -> tuple[list[dict[s
 
 def build_widget_reports(config: Config) -> tuple[list[WidgetReport], int]:
     widgets = get_dashboard_widgets(config)
+    log(f"Fetched dashboard {config.dashboard_id}; found {len(widgets)} total widget(s).")
     reports: list[WidgetReport] = []
     failures = 0
 
@@ -264,6 +273,7 @@ def build_widget_reports(config: Config) -> tuple[list[WidgetReport], int]:
         title = widget_title(widget, query)
         query_id = query.get("id")
         if query_id is None:
+            log(f"Widget '{title}' has query metadata but no query id.")
             reports.append(
                 WidgetReport(
                     title=title,
@@ -277,7 +287,12 @@ def build_widget_reports(config: Config) -> tuple[list[WidgetReport], int]:
             continue
 
         try:
+            log(f"Fetching widget '{title}' (query {query_id}).")
             columns, rows, note = fetch_query_result(config, query_id)
+            log(
+                f"Fetched widget '{title}' (query {query_id}): "
+                f"{len(rows)} row(s), {len(columns)} column(s)."
+            )
             reports.append(
                 WidgetReport(
                     title=title,
@@ -288,6 +303,7 @@ def build_widget_reports(config: Config) -> tuple[list[WidgetReport], int]:
                 )
             )
         except ReportError as exc:
+            log(f"Failed to fetch widget '{title}' (query {query_id}): {exc}")
             reports.append(
                 WidgetReport(
                     title=title,
@@ -300,6 +316,7 @@ def build_widget_reports(config: Config) -> tuple[list[WidgetReport], int]:
             failures += 1
 
     if not reports:
+        log("No widgets containing queries were found on this dashboard.")
         reports.append(
             WidgetReport(
                 title="Dashboard widgets",
@@ -430,7 +447,7 @@ def build_plain_text(reports: list[WidgetReport], generated_at: dt.datetime) -> 
     return "\n".join(lines)
 
 
-def send_email(
+def send_email_once(
     config: Config,
     subject: str,
     plain_text: str,
@@ -455,17 +472,46 @@ def send_email(
             smtp.sendmail(config.email_from, config.email_to, message.as_string())
 
 
+def send_email(
+    config: Config,
+    subject: str,
+    plain_text: str,
+    html_body: str,
+) -> None:
+    for attempt in range(1, SMTP_SEND_ATTEMPTS + 1):
+        try:
+            log(
+                f"Sending email attempt {attempt}/{SMTP_SEND_ATTEMPTS} "
+                f"to {len(config.email_to)} recipient(s)."
+            )
+            send_email_once(config, subject, plain_text, html_body)
+            return
+        except smtplib.SMTPException as exc:
+            if attempt == SMTP_SEND_ATTEMPTS:
+                raise
+            log(
+                f"SMTP send attempt {attempt} failed: {exc}. "
+                f"Retrying in {SMTP_RETRY_DELAY_SECONDS} seconds."
+            )
+            time.sleep(SMTP_RETRY_DELAY_SECONDS)
+
+
 def run() -> int:
     config = load_config()
     generated_at = dt.datetime.now().astimezone()
     subject = f"CFI Loan 风控日报 - {generated_at:%Y-%m-%d}"
 
+    log("Starting CFI Loan Redash dashboard extraction.")
     reports, widget_failures = build_widget_reports(config)
     plain_text = build_plain_text(reports, generated_at)
     html_body = build_html(reports, generated_at)
+    log(
+        f"Built report email with {len(reports)} widget section(s) "
+        f"and {widget_failures} widget failure(s)."
+    )
 
     send_email(config, subject, plain_text, html_body)
-    print(
+    log(
         f"Sent report to {len(config.email_to)} recipient(s): "
         f"{len(reports)} widget section(s), {widget_failures} widget failure(s)."
     )
