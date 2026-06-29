@@ -34,6 +34,8 @@ REQUIRED_ENV_VARS = (
 REQUEST_TIMEOUT_SECONDS = 60
 JOB_POLL_INTERVAL_SECONDS = 2
 JOB_POLL_TIMEOUT_SECONDS = 60
+SMTP_SEND_ATTEMPTS = 3
+SMTP_RETRY_DELAY_SECONDS = 10
 
 
 class ReportError(Exception):
@@ -265,13 +267,13 @@ def widget_title(widget: dict[str, Any], fallback_query_id: int | str | None) ->
 
     visualization = widget.get("visualization")
     if isinstance(visualization, dict):
-        for key in ("name", "title"):
-            value = visualization.get(key)
-            if value:
-                return str(value)
         query = visualization.get("query")
         if isinstance(query, dict) and query.get("name"):
             return str(query["name"])
+        for key in ("title", "name"):
+            value = visualization.get(key)
+            if value:
+                return str(value)
 
     if fallback_query_id is not None:
         return f"Query {fallback_query_id}"
@@ -479,6 +481,33 @@ def send_email(
     message.set_content(plain_text)
     message.add_alternative(html_body, subtype="html")
 
+    last_error: Exception | None = None
+    for attempt in range(1, SMTP_SEND_ATTEMPTS + 1):
+        try:
+            send_email_once(config, message)
+            return
+        except (smtplib.SMTPException, OSError) as exc:
+            last_error = exc
+            if attempt == SMTP_SEND_ATTEMPTS or not should_retry_smtp_error(exc):
+                break
+            logging.warning(
+                "SMTP send attempt %d/%d failed with a retryable error: %s. "
+                "Retrying in %ss.",
+                attempt,
+                SMTP_SEND_ATTEMPTS,
+                exc,
+                SMTP_RETRY_DELAY_SECONDS,
+            )
+            time.sleep(SMTP_RETRY_DELAY_SECONDS)
+
+    if isinstance(last_error, smtplib.SMTPException):
+        raise EmailSendError(f"SMTP send failed: {last_error}") from last_error
+    if isinstance(last_error, OSError):
+        raise EmailSendError(f"SMTP connection failed: {last_error}") from last_error
+    raise EmailSendError("SMTP send failed for an unknown reason")
+
+
+def send_email_once(config: Config, message: EmailMessage) -> None:
     try:
         if config.smtp_port == 465:
             context = ssl.create_default_context()
@@ -495,9 +524,17 @@ def send_email(
                 smtp.login(config.smtp_user, config.smtp_password)
                 smtp.send_message(message)
     except smtplib.SMTPException as exc:
-        raise EmailSendError(f"SMTP send failed: {exc}") from exc
+        raise exc
     except OSError as exc:
-        raise EmailSendError(f"SMTP connection failed: {exc}") from exc
+        raise exc
+
+
+def should_retry_smtp_error(exc: Exception) -> bool:
+    if isinstance(exc, smtplib.SMTPAuthenticationError):
+        return b"system busy" in exc.smtp_error.lower()
+    if isinstance(exc, (smtplib.SMTPServerDisconnected, smtplib.SMTPConnectError)):
+        return True
+    return isinstance(exc, OSError)
 
 
 def configure_logging() -> None:
