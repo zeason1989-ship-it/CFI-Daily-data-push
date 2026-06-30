@@ -4,7 +4,6 @@ import sys
 import unittest
 from datetime import datetime
 from pathlib import Path
-from types import SimpleNamespace
 from unittest import mock
 from urllib.error import HTTPError
 
@@ -212,6 +211,28 @@ class RedashEmailPushTests(unittest.TestCase):
         self.assertEqual(message["From"], "from@example.com")
         self.assertEqual(message["To"], "a@example.com, b@example.com")
         self.assertTrue(message.is_multipart())
+
+    def test_dashboard_name_mismatch_warns_without_blocking(self):
+        config = push.Config(
+            redash_url="https://redash.example.com/",
+            redash_api_key="secret",
+            query_id="3157",
+            dashboard_id="dash-1",
+            dashboard_name="Expected Dashboard",
+            smtp_host="smtp.example.com",
+            smtp_port=465,
+            smtp_user="user",
+            smtp_password="password",
+            email_from="from@example.com",
+            email_to=["to@example.com"],
+        )
+        client = mock.Mock()
+        client.get_dashboard_name.return_value = "Different Dashboard"
+
+        with self.assertLogs(push.LOGGER, level="WARNING") as captured:
+            push.validate_dashboard_name(client, config)
+
+        self.assertIn("Dashboard name mismatch", "\n".join(captured.output))
 
     def test_load_query_id_defaults_to_3157_and_rejects_other_values(self):
         with mock.patch.dict(os.environ, {}, clear=True):

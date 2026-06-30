@@ -293,12 +293,19 @@ def validate_dashboard_name(client: RedashClient, config: Config) -> None:
         LOGGER.info("DASHBOARD_ID not set; skipping dashboard name validation")
         return
 
-    actual_name = client.get_dashboard_name(config.dashboard_id)
+    try:
+        actual_name = client.get_dashboard_name(config.dashboard_id)
+    except RedashError as exc:
+        LOGGER.warning("Dashboard validation skipped: %s", exc)
+        return
+
     if actual_name != config.dashboard_name:
-        raise RedashError(
-            "Dashboard name mismatch: "
-            f"expected {config.dashboard_name!r}, got {actual_name!r}"
+        LOGGER.warning(
+            "Dashboard name mismatch; continuing with DASHBOARD_NAME. Expected %r, got %r",
+            config.dashboard_name,
+            actual_name,
         )
+        return
     LOGGER.info("Dashboard name validated: %s", actual_name)
 
 
