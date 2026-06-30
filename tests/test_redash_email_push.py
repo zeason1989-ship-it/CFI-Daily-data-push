@@ -108,6 +108,46 @@ class RedashEmailPushTests(unittest.TestCase):
         self.assertEqual(result.columns, ["指标分类", "0622"])
         self.assertEqual(result.rows, [{"指标分类": "规模-安卓/IOS 综合", "0622": 10}])
 
+    def test_prepare_report_data_pivots_long_form_query_results(self):
+        rows = []
+        for date_value, metric_value in [
+            ("0427-0503", "999"),
+            ("0622-0628", "888"),
+            ("0623", "100"),
+            ("0624", "101"),
+            ("0625", "102"),
+            ("0626", "103"),
+            ("0627", "104"),
+            ("0628", "105"),
+            ("0629", "106"),
+        ]:
+            rows.append(
+                {
+                    "指标分类": "CFI-安卓/IOS-综合-风控日报",
+                    "日期": date_value,
+                    "样本": "日均注册人数",
+                    "指标项": "规模-安卓/IOS综合",
+                    "一级序号": 1,
+                    "二级序号": 1,
+                    "指标": metric_value,
+                }
+            )
+        query_data = push.QueryData(
+            columns=["指标分类", "日期", "样本", "指标项", "一级序号", "二级序号", "指标"],
+            rows=rows,
+        )
+
+        report_rows, date_columns, excluded = push.prepare_report_data(query_data)
+
+        self.assertEqual(date_columns, ["0623", "0624", "0625", "0626", "0627", "0628", "0629"])
+        self.assertIn("0427-0503", excluded)
+        self.assertIn("0622-0628", excluded)
+        self.assertEqual(len(report_rows), 1)
+        self.assertEqual(report_rows[0]["指标分类"], "规模-安卓/IOS综合")
+        self.assertEqual(report_rows[0]["指标项"], "日均注册人数")
+        self.assertEqual(report_rows[0]["样本"], "-")
+        self.assertEqual(report_rows[0]["0629"], "106")
+
     def test_redash_client_refresh_polls_and_results_fallback(self):
         calls = []
 

@@ -288,6 +288,81 @@ def select_date_columns(columns: Sequence[str], limit: int = 7) -> Tuple[List[st
     return selected, excluded
 
 
+def prepare_report_data(query_data: QueryData) -> Tuple[List[Dict[str, Any]], List[str], List[str]]:
+    try:
+        date_columns, excluded_columns = select_date_columns(query_data.columns)
+        return query_data.rows, date_columns, excluded_columns
+    except ValueError:
+        if "日期" not in query_data.columns or "指标" not in query_data.columns:
+            raise
+
+    LOGGER.info("No 4-digit date column names found; pivoting long-form 日期/指标 rows")
+    pivoted_data, excluded_dates = pivot_long_form_data(query_data)
+    date_columns, excluded_columns = select_date_columns(pivoted_data.columns)
+    excluded = sorted(set(excluded_dates + excluded_columns))
+    return pivoted_data.rows, date_columns, excluded
+
+
+def pivot_long_form_data(query_data: QueryData) -> Tuple[QueryData, List[str]]:
+    date_values = [display_value(row.get("日期"), "") for row in query_data.rows]
+    legal_dates = sorted({date_value for date_value in date_values if DATE_COLUMN_RE.fullmatch(date_value)})
+    if not legal_dates:
+        raise ValueError(f"No valid MMDD date columns found. Original columns: {query_data.columns}")
+
+    selected_dates = legal_dates[-7:]
+    selected_date_set = set(selected_dates)
+    excluded_dates = sorted(
+        {
+            date_value
+            for date_value in date_values
+            if date_value and date_value not in selected_date_set
+        }
+    )
+
+    pivoted_rows: Dict[Tuple[str, str, str, str, str], Dict[str, Any]] = {}
+    for row in query_data.rows:
+        date_value = display_value(row.get("日期"), "")
+        if date_value not in selected_date_set:
+            continue
+
+        metric_category = display_value(row.get("指标项"))
+        metric_item = display_value(row.get("样本"))
+        key = (
+            metric_category,
+            display_value(row.get("一级序号")),
+            metric_item,
+            display_value(row.get("二级序号")),
+            "-",
+        )
+        if key not in pivoted_rows:
+            pivoted_rows[key] = {
+                "指标分类": key[0],
+                "一级序号": key[1],
+                "指标项": key[2],
+                "二级序号": key[3],
+                "样本": key[4],
+            }
+        pivoted_rows[key][date_value] = row.get("指标")
+
+    rows = sorted(
+        pivoted_rows.values(),
+        key=lambda row: (
+            sort_key(row.get("一级序号")),
+            sort_key(row.get("二级序号")),
+            display_value(row.get("指标分类")),
+            display_value(row.get("指标项")),
+        ),
+    )
+    return QueryData(columns=[*BASE_COLUMNS, *selected_dates], rows=rows), excluded_dates
+
+
+def sort_key(value: Any) -> Tuple[int, Any]:
+    parsed = parse_number(value)
+    if parsed is not None:
+        return (0, parsed)
+    return (1, display_value(value))
+
+
 def validate_dashboard_name(client: RedashClient, config: Config) -> None:
     if not config.dashboard_id:
         LOGGER.info("DASHBOARD_ID not set; skipping dashboard name validation")
@@ -469,12 +544,12 @@ def run(config: Config) -> None:
     client.refresh_query(config.query_id, timeout_seconds=config.refresh_timeout_seconds)
     query_data = client.fetch_query_results(config.query_id)
 
-    date_columns, excluded_columns = select_date_columns(query_data.columns)
+    rows, date_columns, excluded_columns = prepare_report_data(query_data)
     LOGGER.info("Included date columns: %s", date_columns)
     LOGGER.info("Excluded columns: %s", excluded_columns)
 
     generated_at = datetime.now()
-    html_body = build_html_email(config.dashboard_name, query_data.rows, date_columns, generated_at)
+    html_body = build_html_email(config.dashboard_name, rows, date_columns, generated_at)
     plain_text = build_plain_text(config.dashboard_name, date_columns, generated_at)
     subject = f"{config.dashboard_name} - {generated_at.strftime('%Y-%m-%d')}"
 
